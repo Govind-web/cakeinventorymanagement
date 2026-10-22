@@ -8,6 +8,26 @@ from app.models.sale import Sale, SaleItem
 from app.models.purchase import Purchase
 from app.models.category import Category
 
+
+def _calc_profit(db: Session, date_filter=None) -> float:
+    """
+    Profit = sum(sale_item.total_price) - sum(sale_item.quantity * product.cost_price)
+    """
+    query = db.query(
+        SaleItem.total_price,
+        SaleItem.quantity,
+        Product.cost_price
+    ).join(Product, SaleItem.product_id == Product.id)
+
+    if date_filter is not None:
+        query = query.join(Sale, SaleItem.sale_id == Sale.id).filter(Sale.sale_date >= date_filter)
+
+    rows = query.all()
+    revenue = sum(r.total_price for r in rows)
+    cogs = sum(r.quantity * r.cost_price for r in rows)
+    return round(revenue - cogs, 2)
+
+
 def get_dashboard_summary(db: Session) -> Dict[str, Any]:
     now = datetime.utcnow()
     today_start = datetime(now.year, now.month, now.day)
@@ -45,23 +65,33 @@ def get_dashboard_summary(db: Session) -> Dict[str, Any]:
         Purchase.status == "RECEIVED"
     ).scalar() or 0.0
 
+    # Profit calculation
+    profit_today = _calc_profit(db, date_filter=today_start)
+    profit_this_month = _calc_profit(db, date_filter=month_start)
+
     # Inventory Valuation (Products cost/price + Ingredients cost)
     products_valuation = sum(p.quantity * p.cost_price for p in products)
     ingredients_valuation = sum(i.quantity * i.cost_per_unit for i in ingredients)
     total_inventory_value = products_valuation + ingredients_valuation
 
-    # Top selling products
+    # Top selling products (with revenue per product for pie chart)
     top_selling_raw = db.query(
         SaleItem.product_id,
         Product.name,
-        func.sum(SaleItem.quantity).label("total_sold")
+        func.sum(SaleItem.quantity).label("total_sold"),
+        func.sum(SaleItem.total_price).label("total_revenue")
     ).join(Product, SaleItem.product_id == Product.id)\
      .group_by(SaleItem.product_id, Product.name)\
      .order_by(func.sum(SaleItem.quantity).desc())\
      .limit(5).all()
 
     top_selling_products = [
-        {"product_id": item[0], "name": item[1], "total_sold": float(item[2])}
+        {
+            "product_id": item[0],
+            "name": item[1],
+            "total_sold": float(item[2]),
+            "total_revenue": round(float(item[3]), 2)
+        }
         for item in top_selling_raw
     ]
 
@@ -107,8 +137,11 @@ def get_dashboard_summary(db: Session) -> Dict[str, Any]:
         "total_sales_this_month": float(sales_month),
         "total_purchase_this_month": float(purchase_month),
         "total_inventory_value": round(float(total_inventory_value), 2),
+        "profit_today": profit_today,
+        "profit_this_month": profit_this_month,
         "top_selling_products": top_selling_products,
         "recent_sales": recent_sales,
         "recent_purchases": recent_purchases,
         "expiring_products": expiring_products
     }
+
